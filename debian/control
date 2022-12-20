@@ -1,0 +1,73 @@
+Source: haskell-uuid-types
+Maintainer: Debian Haskell Group <pkg-haskell-maintainers@lists.alioth.debian.org>
+Uploaders: Joachim Breitner <nomeata@debian.org>
+Priority: optional
+Section: haskell
+Rules-Requires-Root: no
+Build-Depends:
+ cdbs,
+ debhelper (>= 10),
+ ghc (>= 8.4.3),
+ ghc-prof,
+ haskell-devscripts (>= 0.13),
+ libghc-hashable-dev (>= 1.2.1),
+ libghc-hashable-dev (<< 1.4),
+ libghc-hashable-prof,
+ libghc-random-dev (<< 1.2),
+ libghc-random-dev (>= 1.0.1),
+ libghc-random-prof,
+ libghc-hunit-dev (>= 1.2) <!nocheck>,
+ libghc-hunit-dev (<< 1.7) <!nocheck>,
+ libghc-quickcheck2-dev (>= 2.4) <!nocheck>,
+ libghc-quickcheck2-dev (<< 2.15) <!nocheck>,
+ libghc-tasty-dev (>= 0.10) <!nocheck>,
+ libghc-tasty-hunit-dev (>= 0.9) <!nocheck>,
+ libghc-tasty-quickcheck-dev (>= 0.8) <!nocheck>,
+Build-Depends-Indep:
+ ghc-doc,
+ libghc-hashable-doc,
+ libghc-random-doc,
+Standards-Version: 4.5.0
+Homepage: https://github.com/aslatter/uuid
+Vcs-Browser: https://salsa.debian.org/haskell-team/DHG_packages/tree/master/p/haskell-uuid-types
+Vcs-Git: https://salsa.debian.org/haskell-team/DHG_packages.git [p/haskell-uuid-types]
+X-Description: Type definitions for Universally Unique Identifiers
+ This library contains type definitions for Universally Unique Identifiers
+ and basic conversion functions.
+ See <http://en.wikipedia.org/wiki/UUID> for the general idea.
+
+Package: libghc-uuid-types-dev
+Architecture: any
+Depends: ${haskell:Depends}, ${misc:Depends}, ${shlibs:Depends}
+Recommends: ${haskell:Recommends}
+Suggests: ${haskell:Suggests}
+Conflicts: ${haskell:Conflicts}
+Provides: ${haskell:Provides}
+Description: ${haskell:ShortDescription}${haskell:ShortBlurb}
+ ${haskell:LongDescription}
+ .
+ ${haskell:Blurb}
+
+Package: libghc-uuid-types-prof
+Architecture: any
+Depends: ${haskell:Depends}, ${misc:Depends}
+Recommends: ${haskell:Recommends}
+Suggests: ${haskell:Suggests}
+Conflicts: ${haskell:Conflicts}
+Provides: ${haskell:Provides}
+Description: ${haskell:ShortDescription}${haskell:ShortBlurb}
+ ${haskell:LongDescription}
+ .
+ ${haskell:Blurb}
+
+Package: libghc-uuid-types-doc
+Architecture: all
+Section: doc
+Depends: ${haskell:Depends}, ${misc:Depends}
+Recommends: ${haskell:Recommends}
+Suggests: ${haskell:Suggests}
+Conflicts: ${haskell:Conflicts}
+Description: ${haskell:ShortDescription}${haskell:ShortBlurb}
+ ${haskell:LongDescription}
+ .
+ ${haskell:Blurb}
