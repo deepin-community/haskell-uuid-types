@@ -1,88 +1,102 @@
-{-# LANGUAGE DeriveDataTypeable, TypeFamilies, CPP #-}
+{-# LANGUAGE CPP                #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE TypeFamilies       #-}
+{-# LANGUAGE ViewPatterns       #-}
+#if __GLASGOW_HASKELL__ >= 704
+{-# LANGUAGE Unsafe             #-}
+#endif
+#if __GLASGOW_HASKELL__ >=800
+{-# LANGUAGE DeriveLift         #-}
+{-# LANGUAGE StandaloneDeriving #-}
+#endif
+
 {-# OPTIONS_HADDOCK hide #-}
 
 -- |
 -- Module      : Data.UUID.Types.Internal
--- Copyright   : (c) 2008-2009, 2012 Antoine Latter
+-- Copyright   : (c) 2017-2018 Herbert Valerio Riedel
+--               (c) 2008-2009, 2012 Antoine Latter
 --               (c) 2009 Mark Lentczner
 --
 -- License     : BSD-style
 --
--- Maintainer  : aslatter@gmail.com
--- Stability   : experimental
+-- Maintainer  : hvr@gnu.org
 -- Portability : portable
 
 module Data.UUID.Types.Internal
-    (UUID(..)
-    ,null
-    ,nil
-    ,fromByteString
-    ,toByteString
-    ,fromString
-    ,toString
-    ,fromText
-    ,toText
-    ,fromWords
-    ,toWords
-    ,toList
-    ,buildFromBytes
-    ,buildFromWords
-    ,fromASCIIBytes
-    ,toASCIIBytes
-    ,fromLazyASCIIBytes
-    ,toLazyASCIIBytes
-    ,UnpackedUUID(..)
-    ,pack
-    ,unpack
+    ( UUID(..)
+    , null
+    , nil
+    , fromByteString
+    , toByteString
+    , fromString
+    , toString
+    , fromText
+    , toText
+    , fromWords
+    , toWords
+    , fromWords64
+    , toWords64
+    , toList
+    , buildFromBytes
+    , buildFromWords
+    , fromASCIIBytes
+    , toASCIIBytes
+    , fromLazyASCIIBytes
+    , toLazyASCIIBytes
+    , UnpackedUUID(..)
+    , pack
+    , unpack
     ) where
 
-import Prelude hiding (null)
+import           Prelude                          hiding (null)
 
-import Control.Applicative ((<*>))
-import Control.DeepSeq (NFData(..))
-import Control.Monad (liftM4, guard)
-import Data.Functor ((<$>))
-import Data.Char
-import Data.Bits
-import Data.Hashable
-import Data.List (elemIndices)
-import Foreign.Ptr (Ptr)
+import           Control.Applicative              ((<*>))
+import           Control.DeepSeq                  (NFData (..))
+import           Control.Monad                    (guard, liftM2)
+import           Data.Bits
+import           Data.Char
+import           Data.Data
+import           Data.Functor                     ((<$>))
+import           Data.Hashable
+import           Data.List                        (elemIndices)
+import           Foreign.Ptr                      (Ptr)
 
-#if MIN_VERSION_base(4,0,0)
-import Data.Data
+import           Foreign.Storable
+
+import           Data.Binary
+import           Data.Binary.Get
+import           Data.Binary.Put
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Internal         as BI
+import qualified Data.ByteString.Lazy             as BL
+import qualified Data.ByteString.Unsafe           as BU
+import           Data.Text                        (Text)
+import qualified Data.Text.Encoding               as T
+
+import           Data.UUID.Types.Internal.Builder
+
+#if MIN_VERSION_random(1,2,0)
+import           System.Random (Random (..), uniform)
+import           System.Random.Stateful (Uniform (..), uniformWord64)
 #else
-import Data.Generics.Basics
+import           System.Random (Random (..), next)
 #endif
 
-import Foreign.Storable
+#if __GLASGOW_HASKELL__ >=800
+import Language.Haskell.TH.Syntax (Lift)
+#else
+import Language.Haskell.TH (appE, varE)
+import Language.Haskell.TH.Syntax (Lift (..), mkNameG_v, Lit (IntegerL), Exp (LitE))
+#endif
 
-import Data.Binary
-import Data.Binary.Put
-import Data.Binary.Get
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Internal as BI
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Unsafe as BU
-import           Data.Text (Text)
-import qualified Data.Text as T
-
-import Data.UUID.Types.Internal.Builder
-
-import System.Random
-
-
--- |The UUID type.  A 'Random' instance is provided which produces
--- version 4 UUIDs as specified in RFC 4122.  The 'Storable' and
--- 'Binary' instances are compatible with RFC 4122, storing the fields
--- in network order as 16 bytes.
-data UUID
-    = UUID
-         {-# UNPACK #-} !Word32
-         {-# UNPACK #-} !Word32
-         {-# UNPACK #-} !Word32
-         {-# UNPACK #-} !Word32
-    deriving (Eq, Ord, Typeable)
+-- | Type representing <https://en.wikipedia.org/wiki/UUID Universally Unique Identifiers (UUID)> as specified in
+--  <http://tools.ietf.org/html/rfc4122 RFC 4122>.
+data UUID = UUID {-# UNPACK #-} !Word64 {-# UNPACK #-} !Word64
+          deriving (Eq, Ord, Typeable)
 {-
+    Prior to uuid-types-1.0.4:
+         !Word32 !Word32 !Word32 !Word32
     Other representations that we tried are:
          Mimic V1 structure:     !Word32 !Word16 !Word16 !Word16
                                    !Word8 !Word8 !Word8 !Word8 !Word8 !Word8
@@ -94,40 +108,75 @@ data UUID
     None was as fast, overall, as the representation used here.
 -}
 
--- | Covert a 'UUID' into a sequence of 'Word32' values.
+-- | Convert a 'UUID' into a sequence of 'Word32' values.
 -- Useful for when you need to serialize a UUID and
 -- neither 'Storable' nor 'Binary' are appropriate.
--- Introduced in version 1.2.2.
+--
+-- >>> toWords <$> fromString "550e8400-e29b-41d4-a716-446655440000"
+-- Just (1427014656,3801825748,2803254374,1430519808)
+--
+-- See also 'toWords64'.
+--
+-- /Since: @uuid-1.2.2@/
+--
+-- @since 1.0.0
 toWords :: UUID -> (Word32, Word32, Word32, Word32)
-toWords (UUID w1 w2 w3 w4) = (w1, w2, w3, w4)
+toWords (UUID w12 w34) = (w1, w2, w3, w4)
+  where
+    w1 = fromIntegral (w12 `unsafeShiftR` 32)
+    w2 = fromIntegral w12
+    w3 = fromIntegral (w34 `unsafeShiftR` 32)
+    w4 = fromIntegral w34
 
 -- | Create a 'UUID' from a sequence of 'Word32'. The
--- opposite of 'toWords'. Useful when you need a total
+-- inverse of 'toWords'. Useful when you need a total
 -- function for constructing 'UUID' values.
--- Introduced in version 1.2.2.
+--
+-- See also 'fromWords64'.
+--
+-- /Since: @uuid-1.2.2@/
+--
+-- @since 1.0.0
 fromWords :: Word32 -> Word32 -> Word32 -> Word32 -> UUID
-fromWords = UUID
+fromWords w1 w2 w3 w4 = UUID (w32to64 w1 w2) (w32to64 w3 w4)
+
+-- | Convert a 'UUID' into a pair of 'Word64's.
+--
+-- >>> toWords64 <$> fromString "550e8400-e29b-41d4-a716-446655440000"
+-- Just (6128981282234515924,12039885860129472512)
+--
+-- See also 'toWords'.
+--
+-- @since 1.0.4
+toWords64 :: UUID -> (Word64, Word64)
+toWords64 (UUID w12 w34) = (w12,w34)
+
+-- | Create a 'UUID' from a pair of 'Word64's.
+--
+-- Inverse of 'toWords64'. See also 'fromWords'.
+--
+-- @since 1.0.4
+fromWords64 :: Word64 -> Word64 -> UUID
+fromWords64 = UUID
 
 data UnpackedUUID =
     UnpackedUUID {
-        time_low :: Word32 -- 0-3
-      , time_mid :: Word16 -- 4-5
+        time_low            :: Word32 -- 0-3
+      , time_mid            :: Word16 -- 4-5
       , time_hi_and_version :: Word16 -- 6-7
-      , clock_seq_hi_res :: Word8 -- 8
-      , clock_seq_low :: Word8 -- 9
-      , node_0 :: Word8
-      , node_1 :: Word8
-      , node_2 :: Word8
-      , node_3 :: Word8
-      , node_4 :: Word8
-      , node_5 :: Word8
+      , clock_seq_hi_res    :: Word8 -- 8
+      , clock_seq_low       :: Word8 -- 9
+      , node_0              :: Word8
+      , node_1              :: Word8
+      , node_2              :: Word8
+      , node_3              :: Word8
+      , node_4              :: Word8
+      , node_5              :: Word8
       }
     deriving (Read, Show, Eq, Ord)
 
 unpack :: UUID -> UnpackedUUID
-unpack (UUID w0 w1 w2 w3) =
-    build /-/ w0 /-/ w1 /-/ w2 /-/ w3
-
+unpack (UUID w0 w1) = build /-/ w0 /-/ w1
  where
     build x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 xA xB xC xD xE xF =
      UnpackedUUID {
@@ -162,23 +211,26 @@ pack unpacked =
 
 -- |Build a Word32 from four Word8 values, presented in big-endian order
 word :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
-word a b c d =  (fromIntegral a `shiftL` 24)
-            .|. (fromIntegral b `shiftL` 16)
-            .|. (fromIntegral c `shiftL`  8)
-            .|. (fromIntegral d            )
+word a b c d =  (fromIntegral a `unsafeShiftL` 24)
+            .|. (fromIntegral b `unsafeShiftL` 16)
+            .|. (fromIntegral c `unsafeShiftL`  8)
+            .|. (fromIntegral d                  )
 
--- |Extract a Word8 from a Word32. Bytes, high to low, are numbered from 3 to 0,
-byte :: Int -> Word32 -> Word8
+-- |Extract a Word8 from a Word64. Bytes, high to low, are numbered from 7 to 0,
+byte :: Int -> Word64 -> Word8
 byte i w = fromIntegral (w `shiftR` (i * 8))
 
 -- |Build a Word16 from two Word8 values, presented in big-endian order.
 w8to16 :: Word8 -> Word8 -> Word16
 w8to16 w0s w1s =
-    (w0 `shiftL` 8) .|. w1
+    (w0 `unsafeShiftL` 8) .|. w1
   where
     w0 = fromIntegral w0s
     w1 = fromIntegral w1s
 
+-- | Construct 'Word64' from low/high 'Word32's
+w32to64 :: Word32 -> Word32 -> Word64
+w32to64 w0 w1 = (fromIntegral w0 `unsafeShiftL` 32) .|. (fromIntegral w1)
 
 -- |Make a UUID from sixteen Word8 values
 makeFromBytes :: Word8 -> Word8 -> Word8 -> Word8
@@ -187,15 +239,11 @@ makeFromBytes :: Word8 -> Word8 -> Word8 -> Word8
               -> Word8 -> Word8 -> Word8 -> Word8
               -> UUID
 makeFromBytes b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 ba bb bc bd be bf
-        = UUID w0 w1 w2 w3
+        = fromWords w0 w1 w2 w3
     where w0 = word b0 b1 b2 b3
           w1 = word b4 b5 b6 b7
           w2 = word b8 b9 ba bb
           w3 = word bc bd be bf
-
--- |Make a UUID from four Word32 values
-makeFromWords :: Word32 -> Word32 -> Word32 -> Word32 -> UUID
-makeFromWords = UUID
 
 -- |A Builder for constructing a UUID of a given version.
 buildFromBytes :: Word8
@@ -209,20 +257,20 @@ buildFromBytes v b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 ba bb bc bd be bf =
     where b6' = b6 .&. 0x0f .|. (v `shiftL` 4)
           b8' = b8 .&. 0x3f .|. 0x80
 
--- |Build a UUID of a given version from Word32 values.
+-- |Build a UUID of a given version from 'Word32' values.
 buildFromWords :: Word8 -> Word32 -> Word32 -> Word32 -> Word32 -> UUID
-buildFromWords v w0 w1 w2 w3 = makeFromWords w0 w1' w2' w3
+buildFromWords v w0 w1 w2 w3 = fromWords w0 w1' w2' w3
     where w1' = w1 .&. 0xffff0fff .|. ((fromIntegral v) `shiftL` 12)
           w2' = w2 .&. 0x3fffffff .|. 0x80000000
 
 
 -- |Return the bytes that make up the UUID
 toList :: UUID -> [Word8]
-toList (UUID w0 w1 w2 w3) =
-    [byte 3 w0, byte 2 w0, byte 1 w0, byte 0 w0,
-     byte 3 w1, byte 2 w1, byte 1 w1, byte 0 w1,
-     byte 3 w2, byte 2 w2, byte 1 w2, byte 0 w2,
-     byte 3 w3, byte 2 w3, byte 1 w3, byte 0 w3]
+toList (UUID w0 w1) =
+    [byte 7 w0, byte 6 w0, byte 5 w0, byte 4 w0,
+     byte 3 w0, byte 2 w0, byte 1 w0, byte 0 w0,
+     byte 7 w1, byte 6 w1, byte 5 w1, byte 4 w1,
+     byte 3 w1, byte 2 w1, byte 1 w1, byte 0 w1]
 
 -- |Construct a UUID from a list of Word8. Returns Nothing if the list isn't
 -- exactly sixteen bytes long
@@ -243,10 +291,10 @@ null = (== nil)
     --      null (UUID 0 0 0 0) = True
     --      null _              = False
 
--- |The nil UUID, as defined in RFC 4122.
--- It is a UUID of all zeros. @'null' u@ iff @'u' == 'nil'@.
+-- |The 'nil' UUID, as defined in <http://tools.ietf.org/html/rfc4122 RFC 4122>.
+-- It is a UUID of all zeros. @'null' u@ /iff/ @'u' == 'nil'@.
 nil :: UUID
-nil = UUID 0 0 0 0
+nil = UUID 0 0
 
 -- |Extract a UUID from a 'ByteString' in network byte order.
 -- The argument must be 16 bytes long, otherwise 'Nothing' is returned.
@@ -254,6 +302,8 @@ fromByteString :: BL.ByteString -> Maybe UUID
 fromByteString = fromList . BL.unpack
 
 -- |Encode a UUID into a 'ByteString' in network order.
+--
+-- This uses the same encoding as the 'Binary' instance.
 toByteString :: UUID -> BL.ByteString
 toByteString = BL.pack . toList
 
@@ -261,9 +311,8 @@ toByteString = BL.pack . toList
 -- The hyphens may not be omitted.
 -- Example:
 --
--- @
---  fromString \"c2cc10e1-57d6-4b6f-9899-38d972112d8c\"
--- @
+-- >>> fromString "c2cc10e1-57d6-4b6f-9899-38d972112d8c"
+-- Just c2cc10e1-57d6-4b6f-9899-38d972112d8c
 --
 -- Hex digits may be upper or lower-case.
 fromString :: String -> Maybe UUID
@@ -278,7 +327,7 @@ fromString' s0 = do
     (w2, s3) <- hexWord s2
     (w3, s4) <- hexWord s3
     if s4 /= "" then Nothing
-                else Just $ UUID w0 w1 w2 w3
+                else Just $ fromWords w0 w1 w2 w3
     where hexWord :: String -> Maybe (Word32, String)
           hexWord s = Just (0, s) >>= hexByte >>= hexByte
                                   >>= hexByte >>= hexByte
@@ -295,30 +344,39 @@ fromString' s0 = do
 -- | Convert a UUID into a hypenated string using lower-case letters.
 -- Example:
 --
--- @
---  toString \<$\> fromString \"550e8400-e29b-41d4-a716-446655440000\"
--- @
+-- >>> toString <$> fromString "550e8400-e29b-41d4-a716-446655440000"
+-- Just "550e8400-e29b-41d4-a716-446655440000"
+--
+--
 toString :: UUID -> String
-toString (UUID w0 w1 w2 w3) = hexw w0 $ hexw' w1 $ hexw' w2 $ hexw w3 ""
-    where hexw :: Word32 -> String -> String
-          hexw  w s = hexn w 28 : hexn w 24 : hexn w 20 : hexn w 16
-                    : hexn w 12 : hexn w  8 : hexn w  4 : hexn w  0 : s
+toString uuid = hexw0 w0 $ hexw1 w1 ""
+    where hexw0 :: Word64 -> String -> String
+          hexw0 w s =       hexn w 60 : hexn w 56 : hexn w 52 : hexn w 48
+                          : hexn w 44 : hexn w 40 : hexn w 36 : hexn w 32
+                    : '-' : hexn w 28 : hexn w 24 : hexn w 20 : hexn w 16
+                    : '-' : hexn w 12 : hexn w  8 : hexn w  4 : hexn w  0
+                          : s
 
-          hexw' :: Word32 -> String -> String
-          hexw' w s = '-' : hexn w 28 : hexn w 24 : hexn w 20 : hexn w 16
-                    : '-' : hexn w 12 : hexn w  8 : hexn w  4 : hexn w  0 : s
+          hexw1 :: Word64 -> String -> String
+          hexw1 w s = '-' : hexn w 60 : hexn w 56 : hexn w 52 : hexn w 48
+                    : '-' : hexn w 44 : hexn w 40 : hexn w 36 : hexn w 32
+                          : hexn w 28 : hexn w 24 : hexn w 20 : hexn w 16
+                          : hexn w 12 : hexn w  8 : hexn w  4 : hexn w  0
+                          : s
 
-          hexn :: Word32 -> Int -> Char
+          hexn :: Word64 -> Int -> Char
           hexn w r = intToDigit $ fromIntegral ((w `shiftR` r) .&. 0xf)
+
+          (w0,w1) = toWords64 uuid
 
 -- | If the passed in `Text` can be parsed as an ASCII representation of
 --   a `UUID`, it will be. The hyphens may not be omitted.
 fromText :: Text -> Maybe UUID
-fromText = fromString . T.unpack
+fromText = fromASCIIBytes . T.encodeUtf8
 
 -- | Convert a UUID into a hyphentated string using lower-case letters.
 toText :: UUID -> Text
-toText = T.pack . toString
+toText = T.decodeLatin1 . toASCIIBytes
 
 -- | Convert a UUID into a hyphentated string using lower-case letters, packed
 --   as ASCII bytes into `B.ByteString`.
@@ -435,6 +493,20 @@ fromLazyASCIIBytes bs =
 -- Class Instances
 --
 
+-- | This 'Random' instance produces __insecure__ version 4 UUIDs as
+-- specified in <http://tools.ietf.org/html/rfc4122 RFC 4122>.
+#if MIN_VERSION_random(1,2,0)
+instance Random UUID where
+    random = uniform
+    randomR _ = random -- range is ignored
+
+-- @since 1.0.4
+instance Uniform UUID where
+    uniformM gen = do
+        w0 <- uniformWord64 gen
+        w1 <- uniformWord64 gen
+        pure $ buildFromBytes 4 /-/ w0 /-/ w1
+#else
 instance Random UUID where
     random g = (fromGenNext w0 w1 w2 w3 w4, g4)
         where (w0, g0) = next g
@@ -456,6 +528,7 @@ fromGenNext w0 w1 w2 w3 w4 =
                                -- field will "cover" the upper, non-random bits
                      /-/ (ThreeByte w3)
                      /-/ (ThreeByte w4)
+#endif
 
 -- |A ByteSource to extract only three bytes from an Int, since next on StdGet
 -- only returns 31 bits of randomness.
@@ -463,24 +536,29 @@ type instance ByteSink ThreeByte g = Takes3Bytes g
 newtype ThreeByte = ThreeByte Int
 instance ByteSource ThreeByte where
     f /-/ (ThreeByte w) = f b1 b2 b3
-        where b1 = fromIntegral (w `shiftR` 16)
-              b2 = fromIntegral (w `shiftR` 8)
+        where b1 = fromIntegral (w `unsafeShiftR` 16)
+              b2 = fromIntegral (w `unsafeShiftR` 8)
               b3 = fromIntegral w
 
 instance NFData UUID where
-    rnf = rnf . toWords
+    rnf = flip seq ()
 
 instance Hashable UUID where
-    hash (UUID w0 w1 w2 w3) =
+    hash (toWords -> (w0,w1,w2,w3)) =
         hash w0 `hashWithSalt` w1
                 `hashWithSalt` w2
                 `hashWithSalt` w3
-    hashWithSalt s (UUID w0 w1 w2 w3) =
+    hashWithSalt s (toWords -> (w0,w1,w2,w3)) =
         s `hashWithSalt` w0
           `hashWithSalt` w1
           `hashWithSalt` w2
           `hashWithSalt` w3
 
+-- | Pretty prints a 'UUID' (without quotation marks). See also 'toString'.
+--
+-- >>> show nil
+-- "00000000-0000-0000-0000-000000000000"
+--
 instance Show UUID where
     show = toString
 
@@ -491,7 +569,7 @@ instance Read UUID where
           Nothing -> []
           Just u  -> [(u,drop 36 noSpaces)]
 
-
+-- | This 'Storable' instance uses the memory layout as described in <http://tools.ietf.org/html/rfc4122 RFC 4122>, but in contrast to the 'Binary' instance, __the fields are stored in host byte order__.
 instance Storable UUID where
     sizeOf _ = 16
     alignment _ = 4
@@ -528,10 +606,10 @@ instance Storable UUID where
                 pokeByteOff p (off+14) x9
                 pokeByteOff p (off+15) x10
 
+-- | This 'Binary' instance is compatible with <http://tools.ietf.org/html/rfc4122 RFC 4122>, storing the fields in network order as 16 bytes.
 instance Binary UUID where
-    put (UUID w0 w1 w2 w3) =
-        putWord32be w0 >> putWord32be w1 >> putWord32be w2 >> putWord32be w3
-    get = liftM4 UUID getWord32be getWord32be getWord32be getWord32be
+    put (UUID w0 w1) = putWord64be w0 >> putWord64be w1
+    get = liftM2 UUID getWord64be getWord64be
 
 
 -- My goal with this instance was to make it work just enough to do what
@@ -544,7 +622,27 @@ instance Data UUID where
 uuidType :: DataType
 uuidType =  mkNoRepType "Data.UUID.Types.UUID"
 
-#if !(MIN_VERSION_base(4,2,0))
-mkNoRepType :: String -> DataType
-mkNoRepType = mkNorepType
+#if !MIN_VERSION_base(4,5,0)
+unsafeShiftR, unsafeShiftL :: Bits w => w -> Int -> w
+{-# INLINE unsafeShiftR #-}
+unsafeShiftR = shiftR
+{-# INLINE unsafeShiftL #-}
+unsafeShiftL = shiftL
+#endif
+
+#if __GLASGOW_HASKELL__ >=800
+deriving instance Lift UUID
+#else
+instance Lift UUID where
+    lift (UUID w1 w2) = varE fromWords64Name `appE` liftW64 w1 `appE` liftW64 w2
+      where
+        fromWords64Name = mkNameG_v currentPackageKey "Data.UUID.Types.Internal" "fromWords64"
+        liftW64 x = return (LitE (IntegerL (fromIntegral x)))
+
+currentPackageKey :: String
+#ifdef CURRENT_PACKAGE_KEY
+currentPackageKey = CURRENT_PACKAGE_KEY
+#else
+currentPackageKey = "uuid-types-1.0.5"
+#endif
 #endif
