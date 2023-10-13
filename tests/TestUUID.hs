@@ -1,22 +1,29 @@
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-import qualified Data.ByteString.Lazy as BL
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+import           Data.Binary                (encode)
+import qualified Data.ByteString.Char8      as BC8
+import qualified Data.ByteString.Lazy       as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
-import qualified Data.ByteString.Char8 as BC8
-import Data.Char (ord)
-import Data.Functor ((<$>))
-import Data.Word
-import qualified Data.UUID.Types as U
-import Foreign (alloca, peek, poke)
-import System.IO.Unsafe (unsafePerformIO)
+import           Data.Char                  (ord)
+import           Data.Functor               ((<$>))
+import qualified Data.UUID.Types            as U
+import           Data.Word
+import           Foreign                    (alloca, castPtr, peek, poke,
+                                             sizeOf)
+import           GHC.ByteOrder              (ByteOrder(..), targetByteOrder)
+import           System.IO.Unsafe           (unsafePerformIO)
 
-import Test.QuickCheck ( Arbitrary(arbitrary), choose )
+import           Test.QuickCheck            (Arbitrary (arbitrary), choose)
 
-import Test.Tasty ( defaultMain, TestTree, testGroup )
-import Test.Tasty.HUnit ( assertBool, (@?=), (@=?), testCase )
-import Test.Tasty.QuickCheck ( testProperty )
+import           Test.Tasty                 (TestTree, defaultMain, testGroup)
+import           Test.Tasty.HUnit           (assertBool, testCase, (@=?), (@?=))
+import           Test.Tasty.QuickCheck      (testProperty)
 
 
+-- orphan
 instance Arbitrary U.UUID where
     -- the UUID random instance ignores bounds
     arbitrary = choose (U.nil, U.nil)
@@ -34,6 +41,11 @@ test_nil = testGroup "nil" [
     testCase "nil bytes"  $ U.toByteString U.nil @?= BL.pack (replicate 16 0)
     ]
 
+test_lift :: Test
+test_lift = testCase "TH.Lift" $ do
+    let uuid = U.fromWords64 123456789 987654321
+    uuid @?= $( [| uuid |] )
+
 test_conv :: Test
 test_conv = testGroup "conversions" [
     testCase "conv bytes to string" $
@@ -49,13 +61,32 @@ test_fromByteString :: Test
 test_fromByteString =
     testCase "UUID fromByteString" $
         Just inputUUID @=?
-             U.fromByteString (BL8.pack "\165\202\133f\217\197H5\153\200\225\241>s\181\226")
+             U.fromByteString (BL8.pack "\xa5\xca\x85\x66\xd9\xc5\x48\x35\x99\xc8\xe1\xf1\x3e\x73\xb5\xe2")
 
 -- | Test fromWords with a fixed-input
 test_fromWords :: Test
 test_fromWords =
     testCase "UUID fromWords" $
-        inputUUID @=? U.fromWords 2781513062 3653584949 2580079089 1047770594
+        inputUUID @=? U.fromWords 0xa5ca8566 0xd9c54835 0x99c8e1f1 0x3e73b5e2
+
+
+test_Storeable :: Test
+test_Storeable =
+    testCase "UUID Storeable(poke)" $
+        case targetByteOrder of
+          LittleEndian -> BC8.pack "\x66\x85\xca\xa5\xc5\xd9\x35\x48\x99\xc8\xe1\xf1\x3e\x73\xb5\xe2" @=? pokeAsBS inputUUID
+          BigEndian    -> BC8.pack "\xa5\xca\x85\x66\xd9\xc5\x48\x35\x99\xc8\xe1\xf1\x3e\x73\xb5\xe2" @=? pokeAsBS inputUUID
+  where
+    pokeAsBS :: U.UUID -> BC8.ByteString
+    pokeAsBS uuid = unsafePerformIO $ do
+      alloca $ \ptr -> do
+        poke ptr uuid
+        BC8.packCStringLen (castPtr ptr, sizeOf uuid)
+
+test_Binary :: Test
+test_Binary =
+    testCase "UUID Binary(encode)" $
+        (BL8.pack "\xa5\xca\x85\x66\xd9\xc5\x48\x35\x99\xc8\xe1\xf1\x3e\x73\xb5\xe2") @=? encode inputUUID
 
 inputUUID :: U.UUID
 inputUUID = read "a5ca8566-d9c5-4835-99c8-e1f13e73b5e2"
@@ -151,9 +182,12 @@ main = do
      [ [
         test_null,
         test_nil,
+        test_lift,
         test_conv,
         test_fromByteString,
-        test_fromWords
+        test_fromWords,
+        test_Storeable,
+        test_Binary
         ]
      , [ prop_stringRoundTrip,
          prop_readShowRoundTrip,
